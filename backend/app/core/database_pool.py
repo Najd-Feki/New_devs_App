@@ -1,6 +1,5 @@
 import asyncio
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.pool import QueuePool
 import logging
 from ..config import settings
 
@@ -15,11 +14,20 @@ class DatabasePool:
         """Initialize database connection pool"""
         try:
             # Create async engine with connection pooling
-            database_url = f"postgresql+asyncpg://{settings.supabase_db_user}:{settings.supabase_db_password}@{settings.supabase_db_host}:{settings.supabase_db_port}/{settings.supabase_db_name}"
+            # ISSUE 1 (accuracy): pool used undefined supabase_db_* settings, causing DB init failure and mock revenue fallback.
+            # old code: database_url = f"postgresql+asyncpg://{settings.supabase_db_user}:{settings.supabase_db_password}@{settings.supabase_db_host}:{settings.supabase_db_port}/{settings.supabase_db_name}"
+            # FIX: use configured DATABASE_URL and normalize for asyncpg.
+            raw_database_url = settings.database_url
+            if raw_database_url.startswith("postgresql://"):
+                database_url = raw_database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+            else:
+                database_url = raw_database_url
             
             self.engine = create_async_engine(
                 database_url,
-                poolclass=QueuePool,
+                # ISSUE 1: QueuePool is sync-only and crashes async engine init, forcing mock fallback values.
+                # old code: poolclass=QueuePool,
+                # FIX: let SQLAlchemy pick the async-compatible pool implementation.
                 pool_size=20,  # Number of connections to maintain
                 max_overflow=30,  # Additional connections when needed
                 pool_pre_ping=True,  # Validate connections

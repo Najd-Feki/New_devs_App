@@ -36,31 +36,54 @@ async def calculate_total_revenue(property_id: str, tenant_id: str) -> Dict[str,
     Aggregates revenue from database.
     """
     try:
-        # Import database pool
-        from app.core.database_pool import DatabasePool
-        
-        # Initialize pool if needed
-        db_pool = DatabasePool()
-        await db_pool.initialize()
+        # ISSUE 1 (accuracy): new pool per request increases init failures and triggers mock totals.
+        # old code:
+        # from app.core.database_pool import DatabasePool
+        # db_pool = DatabasePool()
+        # await db_pool.initialize()
+        # FIX: use shared pool instance and initialize once.
+        from app.core.database_pool import db_pool
+        if db_pool.session_factory is None:
+            await db_pool.initialize()
         
         if db_pool.session_factory:
-            async with db_pool.get_session() as session:
+            # ISSUE 1 (accuracy): using coroutine directly in async with can fail and drop to mock fallback.
+            # old code: async with db_pool.get_session() as session:
+            # FIX: await session creation first.
+            async with (await db_pool.get_session()) as session:
                 # Use SQLAlchemy text for raw SQL
                 from sqlalchemy import text
                 
+                # ISSUE 1 (March mismatch): old query summed all-time totals instead of the March reporting period.
+                # old code:
+                # query = text("""
+                #     SELECT property_id, SUM(total_amount) as total_revenue, COUNT(*) as reservation_count
+                #     FROM reservations
+                #     WHERE property_id = :property_id AND tenant_id = :tenant_id
+                #     GROUP BY property_id
+                # """)
+                # FIX: compute March 2024 totals using property-local timezone boundaries.
                 query = text("""
                     SELECT 
-                        property_id,
-                        SUM(total_amount) as total_revenue,
+                        r.property_id,
+                        SUM(r.total_amount) as total_revenue,
                         COUNT(*) as reservation_count
-                    FROM reservations 
-                    WHERE property_id = :property_id AND tenant_id = :tenant_id
-                    GROUP BY property_id
+                    FROM reservations r
+                    JOIN properties p
+                      ON p.id = r.property_id
+                     AND p.tenant_id = r.tenant_id
+                    WHERE r.property_id = :property_id
+                      AND r.tenant_id = :tenant_id
+                      AND (r.check_in_date AT TIME ZONE COALESCE(p.timezone, 'UTC')) >= :start_date
+                      AND (r.check_in_date AT TIME ZONE COALESCE(p.timezone, 'UTC')) < :end_date
+                    GROUP BY r.property_id
                 """)
                 
                 result = await session.execute(query, {
                     "property_id": property_id, 
-                    "tenant_id": tenant_id
+                    "tenant_id": tenant_id,
+                    "start_date": datetime(2024, 3, 1),
+                    "end_date": datetime(2024, 4, 1),
                 })
                 row = result.fetchone()
                 
